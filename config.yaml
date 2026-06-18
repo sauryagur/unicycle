@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/v2.6.0/configuration-schema.json
+package: spec # The package name for the generated code
+generate:
+  models: true         # Generate data models from the spec's schemas
+  gin-server: true     # Generate server boilerplate for Gin
+  strict-server: true  # Generate a stricter server interface (recommended)
+  embedded-spec: true  # Embed the OpenAPI spec in the generated binary
+output: api/api.gen.go # The output file for the generated code

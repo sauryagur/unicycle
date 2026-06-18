@@ -1,0 +1,1532 @@
+openapi: 3.0.3
+info:
+  title: Unicycle Campus Bicycle Sharing API
+  description: |
+    API for Thapar Institute's campus bicycle sharing system.
+    Users can rent bicycles, manage wallets, and view ride history.
+
+    State and enum values throughout this document are drawn directly from
+    Unicycle Technical Specification v1.0, Section 13 (Ride State Machine)
+    and Section 6.4 (Database Schema), to keep the API and backend
+    representations in sync.
+  version: 1.1.0
+  contact:
+    name: Unicycle Team
+    email: unicycle@thapar.edu
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.unicycle.thapar.edu/v1
+    description: Production
+  - url: http://localhost:8080/v1
+    description: Local Development
+
+tags:
+  - name: auth
+    description: Authentication and user management
+  - name: bikes
+    description: Bicycle operations and status
+  - name: rides
+    description: Ride lifecycle management
+  - name: wallet
+    description: Wallet balance and transactions
+  - name: reports
+    description: Damage and issue reporting
+  - name: admin
+    description: Administrative operations (restricted to JWT role=admin)
+  - name: system
+    description: Service health and operational endpoints
+
+paths:
+  # ============================================
+  # AUTH ENDPOINTS
+  # ============================================
+  /auth/google:
+    post:
+      tags: [auth]
+      summary: Authenticate with Google OAuth
+      description: |
+        Exchange a Google OAuth code for a JWT session token.
+        First-time users are automatically registered (Spec Section 8.2);
+        their Google `sub` is linked to their Thapar ID.
+      operationId: authGoogle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - code
+              properties:
+                code:
+                  type: string
+                  description: Google OAuth authorization code
+                  example: "4/0AX4XfWi..."
+                redirect_uri:
+                  type: string
+                  description: OAuth redirect URI (optional, for validation)
+                  example: "https://unicycle.thapar.edu/auth/callback"
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT session token (RS256, 24h expiry, Bearer)
+                    example: "eyJhbGciOiJSUzI1NiIs..."
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh JWT token
+      description: Obtain a new JWT token before the current one expires.
+      operationId: refreshToken
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: New token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    example: "eyJhbGciOiJSUzI1NiIs..."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout user
+      description: Invalidate the current session token.
+      operationId: logout
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Successfully logged out
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Get current user profile
+      operationId: getCurrentUser
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User profile, including current wallet balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================
+  # BIKES ENDPOINTS
+  # ============================================
+  /bikes:
+    get:
+      tags: [bikes]
+      summary: List bicycles
+      description: |
+        Returns bicycles with their current state, sourced from PostgreSQL
+        (Spec Section 6.4). For a single bike's live in-memory status from
+        the Go fleet model, use `/bikes/{bike_id}/status` instead.
+      operationId: listBikes
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: router_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Filter by nearest router/parking station. Per Spec Section 3.2,
+            each parking station has exactly one router node, so the router
+            ID also identifies the station.
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum:
+              - available
+              - battery_disabled
+              - ride_requested
+              - unlocking
+              - in_use
+              - locking
+              - lock_unconfirmed
+              - ended
+              - offline_ended
+              - unlock_failed
+          description: Filter by bicycle ride state (Spec Section 13)
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of bicycles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Bicycle'
+                  total:
+                    type: integer
+                    example: 42
+                  limit:
+                    type: integer
+                    example: 50
+                  offset:
+                    type: integer
+                    example: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /bikes/{bike_id}:
+    get:
+      tags: [bikes]
+      summary: Get bicycle details
+      description: |
+        Returns the persisted bicycle record from PostgreSQL. This may lag
+        the bike's true real-time state by up to one heartbeat interval
+        (5s, Spec Section 4.1); use `/bikes/{bike_id}/status` for the
+        live in-memory value.
+      operationId: getBike
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: bike_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bicycle details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bicycle'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /bikes/{bike_id}/status:
+    get:
+      tags: [bikes]
+      summary: Get real-time bicycle status
+      description: |
+        Returns the current state directly from `unicycle-rt`'s in-memory
+        `FleetState` (Spec Section 6.2). This is rebuilt from MQTT
+        heartbeats on service restart and is not persisted, so it may be
+        briefly unavailable or stale immediately after a deploy.
+      operationId: getBikeStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: bike_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Real-time status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BicycleStatus'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================
+  # RIDES ENDPOINTS
+  # ============================================
+  /rides/start:
+    post:
+      tags: [rides]
+      summary: Start a new ride
+      description: |
+        Reserve a bicycle and trigger the unlock sequence (Spec Section 2,
+        "Data Flow — Unlock"). Acquires a Redis `SET NX` atomic lock on
+        `bike_lock:{bike_id}` (Spec Section 10.5) before issuing the
+        command, so concurrent scans of the same bike are resolved with a
+        409 to all but one caller. Requires wallet balance above the
+        server-configured minimum (Spec Section 9.1).
+      operationId: startRide
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bike_id
+              properties:
+                bike_id:
+                  type: string
+                  format: uuid
+                  description: UUID of the bicycle to unlock (from QR code)
+                  example: "550e8400-e29b-41d4-a716-446655440000"
+                start_router_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    Router/station ID the app believes it is near (optional,
+                    informational — the authoritative start_router_id is
+                    set server-side once the unlock command is relayed).
+      responses:
+        '201':
+          description: Ride started successfully; bicycle state is `ride_requested`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '402':
+          description: Insufficient wallet balance, or account suspended due to deficit (Spec Section 9.3)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "INSUFFICIENT_BALANCE"
+                message: "Wallet balance is insufficient. Minimum balance required: ₹10.00"
+                details:
+                  balance_paise: 500
+                  required_paise: 1000
+        '409':
+          description: Bicycle already reserved, in use, or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "BIKE_UNAVAILABLE"
+                message: "This bike was just taken — try another."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rides/{ride_id}:
+    get:
+      tags: [rides]
+      summary: Get ride details
+      operationId: getRide
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: ride_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ride details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /rides/current:
+    get:
+      tags: [rides]
+      summary: Get active ride
+      description: Returns the current in-progress ride for the authenticated user, if any.
+      operationId: getCurrentRide
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Active ride details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '404':
+          description: No active ride
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "NO_ACTIVE_RIDE"
+                message: "You have no ride in progress"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rides/history:
+    get:
+      tags: [rides]
+      summary: Get ride history
+      description: Paginated list of past rides for the authenticated user.
+      operationId: getRideHistory
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter rides started after this date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter rides started before this date
+      responses:
+        '200':
+          description: Ride history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RideSummary'
+                  total:
+                    type: integer
+                    example: 42
+                  limit:
+                    type: integer
+                    example: 20
+                  offset:
+                    type: integer
+                    example: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rides/{ride_id}/end:
+    post:
+      tags: [rides]
+      summary: End a ride via offline photo evidence
+      description: |
+        Submit a geotagged photo to manually end a ride when the bicycle
+        cannot reach a router to confirm lock (Spec Section 10.2, 10.4
+        FAQ "What if the bicycle's battery dies before I finish my ride?").
+        This does NOT immediately end the ride: it sets the ride's
+        `end_method` to `offline_photo`, sets `dispute_flag: true`, and
+        moves the bicycle to `offline_ended` pending admin review (Spec
+        Section 9.4, Section 13). The ride is billed against the server's
+        last-known timestamp until an admin confirms (Spec Section 9.4).
+
+        This endpoint is for the offline/photo fallback only. Normal ride
+        ends happen automatically when the bicycle confirms the lock to a
+        router (Spec Section 2, "Data Flow — Lock and Ride End") and do not
+        go through this path. Admin-initiated overrides (e.g. after a
+        theft report, per the FAQ) are performed by operations staff
+        directly against the ride record and are out of scope for this
+        endpoint.
+      operationId: endRideOffline
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: ride_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - photo_url
+                - latitude
+                - longitude
+              properties:
+                photo_url:
+                  type: string
+                  format: uri
+                  description: URL of the uploaded geotagged photo of the locked bicycle
+                latitude:
+                  type: number
+                  format: double
+                longitude:
+                  type: number
+                  format: double
+      responses:
+        '200':
+          description: Photo evidence recorded; ride marked offline_ended pending admin review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Ride is not in a state that accepts offline photo evidence (e.g. already ended)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "RIDE_NOT_ELIGIBLE"
+                message: "This ride has already ended and cannot accept photo evidence"
+
+  # ============================================
+  # WALLET ENDPOINTS
+  # ============================================
+  /wallet/balance:
+    get:
+      tags: [wallet]
+      summary: Get wallet balance
+      description: Returns current balance in paise (₹1 = 100 paise, Spec Section 6.4).
+      operationId: getWalletBalance
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current balance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance_paise:
+                    type: integer
+                    description: Balance in paise. Negative indicates deficit (Spec Section 9.3).
+                    example: 5000
+                  formatted:
+                    type: string
+                    description: Human-readable balance
+                    example: "₹50.00"
+                  deficit:
+                    type: boolean
+                    description: True if balance is negative; account is suspended from starting new rides (Spec Section 9.3)
+                    example: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /wallet/topup:
+    post:
+      tags: [wallet]
+      summary: Add funds to wallet
+      description: |
+        Top up wallet via the campus wallet system (Spec Section 9; the
+        spec explicitly excludes third-party payment gateways per the
+        Non-Goals in Section 1). Clients should supply `Idempotency-Key`
+        to safely retry on network failure, since this debits/credits a
+        real balance.
+      operationId: topupWallet
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Client-generated UUID. Retrying a request with the same key
+            returns the original result instead of double-crediting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amount_paise
+              properties:
+                amount_paise:
+                  type: integer
+                  minimum: 100
+                  description: Amount in paise (minimum ₹1)
+                  example: 10000
+                payment_method:
+                  type: string
+                  enum: [campus_wallet]
+                  default: campus_wallet
+                  description: |
+                    Campus wallet only, per Spec Section 1 Non-Goals
+                    ("Third-party payment gateways"). UPI/card are not
+                    supported in v1.0.
+      responses:
+        '200':
+          description: Balance updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id:
+                    type: string
+                    format: uuid
+                  new_balance_paise:
+                    type: integer
+                    example: 15000
+                  old_balance_paise:
+                    type: integer
+                    example: 5000
+                  amount_added_paise:
+                    type: integer
+                    example: 10000
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /wallet/transactions:
+    get:
+      tags: [wallet]
+      summary: Get transaction history
+      operationId: getTransactions
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [ride_charge, topup, refund, adjustment, all]
+            default: all
+      responses:
+        '200':
+          description: Transaction history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+                  total:
+                    type: integer
+                    example: 42
+                  limit:
+                    type: integer
+                    example: 20
+                  offset:
+                    type: integer
+                    example: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================
+  # REPORTS ENDPOINTS
+  # ============================================
+  /reports:
+    post:
+      tags: [reports]
+      summary: Report damage or issue
+      description: |
+        Submit a report for a bicycle issue (Spec Section 6.4 `reports`
+        table). `photo_url` is assumed to come from a separate upload step
+        not covered by this API (e.g. direct-to-object-storage upload);
+        this endpoint only records the resulting URL alongside metadata.
+      operationId: createReport
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bike_id
+                - report_type
+              properties:
+                bike_id:
+                  type: string
+                  format: uuid
+                report_type:
+                  type: string
+                  enum: [damage, vandalism, malfunction, improper_parking]
+                description:
+                  type: string
+                  maxLength: 500
+                  example: "Front brake lever is broken"
+                photo_url:
+                  type: string
+                  format: uri
+                  description: URL of previously-uploaded photo evidence
+      responses:
+        '201':
+          description: Report created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /reports/{report_id}:
+    get:
+      tags: [reports]
+      summary: Get report details
+      operationId: getReport
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: report_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Report details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ============================================
+  # ADMIN ENDPOINTS
+  # All require a JWT with role=admin (Spec Section 8.2) — no separate
+  # admin credential exists in the spec, so this API does not define one.
+  # ============================================
+  /admin/fleet:
+    get:
+      tags: [admin]
+      summary: Get fleet-wide status
+      description: Real-time view of all bicycles and routers, sourced from `unicycle-rt`'s in-memory FleetState (Spec Section 6.2).
+      operationId: getFleetStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Fleet status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/routers:
+    get:
+      tags: [admin]
+      summary: Get router health grid
+      description: Status of all router nodes across campus (Spec Section 11.4).
+      operationId: getRouters
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Router status list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RouterStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/bikes/{bike_id}/disable:
+    post:
+      tags: [admin]
+      summary: Disable a bicycle
+      description: |
+        Mark a bicycle as disabled (Spec Section 8.3, key revocation step
+        1: "Admin marks the bike as disabled via the admin API"). The
+        server stops issuing commands to this bike and routers stop
+        relaying to its MAC address once they receive the revocation list
+        update.
+      operationId: disableBike
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: bike_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  example: "Brake replacement needed"
+      responses:
+        '200':
+          description: Bicycle disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bicycle'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/bikes/{bike_id}/enable:
+    post:
+      tags: [admin]
+      summary: Enable a bicycle
+      description: |
+        Re-enable a previously disabled bicycle. Per Spec Section 8.3, this
+        should only be used after the bike has been physically retrieved
+        and re-provisioned with a new key pair if disablement was due to
+        suspected key compromise.
+      operationId: enableBike
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: bike_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bicycle enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bicycle'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/reports:
+    get:
+      tags: [admin]
+      summary: List all reports
+      description: View all damage reports (Spec Section 11.4, "Damage reports queue").
+      operationId: listReports
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: resolved
+          in: query
+          schema:
+            type: boolean
+          description: Filter by resolution status
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of reports
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Report'
+                  total:
+                    type: integer
+                    example: 15
+                  limit:
+                    type: integer
+                    example: 20
+                  offset:
+                    type: integer
+                    example: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/reports/{report_id}/resolve:
+    post:
+      tags: [admin]
+      summary: Resolve a report
+      description: Mark a damage report as resolved.
+      operationId: resolveReport
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: report_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolution_notes:
+                  type: string
+                  example: "Brake lever replaced"
+      responses:
+        '200':
+          description: Report resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ============================================
+  # HEALTH ENDPOINT
+  # ============================================
+  /health:
+    get:
+      tags: [system]
+      summary: Health check
+      description: |
+        Returns service health status. Used by load balancers and
+        monitoring (Spec Section 11). Checks correspond to unicycle-api's
+        direct dependencies: PostgreSQL, Redis, and the Mosquitto MQTT
+        broker (Spec Section 6.1, 12.1).
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service healthy or degraded (see body for detail)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                    example: healthy
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  uptime:
+                    type: string
+                    example: "72h14m"
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        enum: [ok, error]
+                      redis:
+                        type: string
+                        enum: [ok, error]
+                      mqtt:
+                        type: string
+                        enum: [ok, error]
+        '503':
+          description: Service unhealthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [unhealthy]
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        enum: [ok, error]
+                      redis:
+                        type: string
+                        enum: [ok, error]
+                      mqtt:
+                        type: string
+                        enum: [ok, error]
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT token obtained from `/auth/google` (RS256, 24h expiry, Spec
+        Section 8.2). Carries `user_id`, `thapar_id`, `role`
+        (`student` | `admin`), and `exp`. Endpoints under the `admin` tag
+        require `role: admin`. There is no separate admin credential: the
+        spec defines exactly one authentication mechanism (this one), and
+        admin access is purely a claim on the same token.
+        Include as: `Authorization: Bearer <token>`
+
+  schemas:
+    # ==================== SHARED ENUMS ====================
+    BicycleRideState:
+      type: string
+      description: |
+        Bicycle ride state, exactly as defined in Spec Section 13
+        (Ride State Machine). This is the single source of truth for
+        bicycle state across every schema in this document — do not
+        introduce parallel or abbreviated state lists elsewhere.
+      enum:
+        - available
+        - battery_disabled
+        - ride_requested
+        - unlocking
+        - in_use
+        - locking
+        - lock_unconfirmed
+        - ended
+        - offline_ended
+        - unlock_failed
+      example: "in_use"
+
+    LedColor:
+      type: string
+      description: LED indicator color per Spec Section 3.3. Blinking states are reported separately via `battery_warning`.
+      enum: [off, green, orange, red]
+
+    BatteryWarningLevel:
+      type: string
+      description: Section 3.3 LED blink states, surfaced as a discrete field rather than overloading `led_color`.
+      enum: [none, low_slow_blink, critical_fast_blink]
+
+    RideEndMethod:
+      type: string
+      description: Spec Section 6.4 `rides.end_method` column.
+      enum: [confirmed, offline_photo, admin_override]
+
+    # ==================== USER ====================
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        thapar_id:
+          type: string
+          description: Student ID
+          example: "102304015"
+        email:
+          type: string
+          format: email
+          example: "student@thapar.edu"
+        name:
+          type: string
+          example: "Aarav Singh"
+        role:
+          type: string
+          enum: [student, admin]
+          example: "student"
+        suspended:
+          type: boolean
+          description: True when wallet is in deficit (Spec Section 9.3); blocks starting new rides.
+          example: false
+        wallet_balance_paise:
+          type: integer
+          description: Current wallet balance in paise. Included here so every endpoint that returns a User also surfaces balance, instead of only the login response.
+          example: 5000
+        created_at:
+          type: string
+          format: date-time
+
+    # ==================== BICYCLE ====================
+    Bicycle:
+      type: object
+      description: Persisted bicycle record (Spec Section 6.4 `bikes` table).
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        serial_number:
+          type: string
+          example: "UNC-001"
+        mac_address:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
+          example: "AA:BB:CC:DD:EE:FF"
+        state:
+          $ref: '#/components/schemas/BicycleRideState'
+        battery_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          example: 87
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        current_ride_id:
+          type: string
+          format: uuid
+          nullable: true
+        disabled:
+          type: boolean
+          description: |
+            Administrative kill-switch (Spec Section 8.3), independent of
+            `state`. A bike can be `disabled: true` while its last-known
+            `state` is anything — disabling does not change ride state,
+            it only blocks future commands. The mobile app should treat
+            any bike with `disabled: true` as unrentable regardless of
+            `state`.
+          example: false
+      required:
+        - id
+        - serial_number
+        - mac_address
+        - state
+        - disabled
+
+    BicycleStatus:
+      type: object
+      description: Live status from the in-memory FleetState (Spec Section 6.2), not the persisted record.
+      properties:
+        bike_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/BicycleRideState'
+        battery_pct:
+          type: integer
+          nullable: true
+        last_heartbeat_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null if the bike has never reported in to this fleet model (e.g. immediately after a service restart, Spec Section 6.2).
+        is_upright:
+          type: boolean
+          nullable: true
+          description: From the MPU-6050 accelerometer (Spec Section 3.1, 10.4). Null if unknown.
+        router_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The router currently reporting this bike as connected, if any (Spec Section 4.1, "connected bike" list).
+        led_color:
+          $ref: '#/components/schemas/LedColor'
+        battery_warning:
+          $ref: '#/components/schemas/BatteryWarningLevel'
+      required:
+        - bike_id
+        - state
+        - led_color
+
+    # ==================== RIDE ====================
+    Ride:
+      type: object
+      description: |
+        Maps directly to Spec Section 6.4 `rides` table. `state` and
+        `dispute_flag` are independent: a ride can be `ended` (or
+        `offline_ended`) AND disputed at the same time (Spec Section 9.4).
+        `dispute_flag` is not a value of `state`.
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        bike_id:
+          type: string
+          format: uuid
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_seconds:
+          type: integer
+          nullable: true
+        amount_paise:
+          type: integer
+          nullable: true
+          description: Amount charged in paise. Reflects server's last-known timestamp while disputed (Spec Section 9.4).
+        state:
+          type: string
+          description: |
+            Spec Section 6.4 `rides.state` column. Distinct from bicycle
+            RideState (Section 13) — this tracks the ride record's
+            lifecycle, not the bike's physical/comms state.
+          enum: [in_progress, ended, offline_ended]
+          example: "in_progress"
+        start_router_id:
+          type: string
+          format: uuid
+          nullable: true
+        end_router_id:
+          type: string
+          format: uuid
+          nullable: true
+        end_method:
+          $ref: '#/components/schemas/RideEndMethod'
+        dispute_flag:
+          type: boolean
+          description: Set when ended via offline photo or a conflicting bike log sync (Spec Section 9.4). Independent of `state`.
+      required:
+        - id
+        - user_id
+        - bike_id
+        - started_at
+        - state
+        - dispute_flag
+
+    RideSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bike_id:
+          type: string
+          format: uuid
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_seconds:
+          type: integer
+          nullable: true
+        amount_paise:
+          type: integer
+          nullable: true
+        state:
+          type: string
+          enum: [in_progress, ended, offline_ended]
+        dispute_flag:
+          type: boolean
+
+    # ==================== WALLET ====================
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        amount_paise:
+          type: integer
+          description: Positive for credit, negative for debit
+          example: -200
+        type:
+          type: string
+          enum: [ride_charge, topup, refund, adjustment]
+        description:
+          type: string
+          example: "Ride #abc-123 - 15 min"
+        balance_after_paise:
+          type: integer
+          example: 4800
+        created_at:
+          type: string
+          format: date-time
+
+    # ==================== REPORT ====================
+    Report:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bike_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+          nullable: true
+        report_type:
+          type: string
+          enum: [damage, vandalism, malfunction, improper_parking]
+        description:
+          type: string
+          nullable: true
+        photo_url:
+          type: string
+          format: uri
+          nullable: true
+        resolved:
+          type: boolean
+        resolution_notes:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ==================== ADMIN ====================
+    FleetStatus:
+      type: object
+      description: Aggregate counts derived from the live RideState distribution (Spec Section 13) plus router health (Spec Section 11.2).
+      properties:
+        total_bikes:
+          type: integer
+        bikes_by_state:
+          type: object
+          description: Count of bikes in each RideState value. Keys are RideState enum values.
+          additionalProperties:
+            type: integer
+          example:
+            available: 30
+            in_use: 8
+            locking: 1
+            lock_unconfirmed: 2
+            battery_disabled: 1
+        active_rides:
+          type: integer
+        orange_state_count:
+          type: integer
+          description: Count of bikes currently in `locking` or `lock_unconfirmed` (the two states shown as orange per Spec Section 3.3). Mirrors the `unicycle_orange_state_duration_seconds` health signal (Spec Section 11.2).
+        router_count:
+          type: integer
+        online_routers:
+          type: integer
+        fleet_health:
+          type: string
+          enum: [good, warning, critical]
+
+    RouterStatus:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        location_name:
+          type: string
+          example: "Library Entrance"
+        online:
+          type: boolean
+          description: False if no heartbeat received for 90s / 3 missed intervals (Spec Section 10.1).
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        connected_bikes_count:
+          type: integer
+          description: Size of the router's `{mac_address → last_seen_ms}` table (Spec Section 5.5); entries expire after 15s without a heartbeat.
+        uptime_seconds:
+          type: integer
+          nullable: true
+        signal_strength_dbm:
+          type: integer
+          nullable: true
+          description: 4G signal strength in dBm
+
+    # ==================== COMMON ====================
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+          example: "INVALID_REQUEST"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "The request payload is invalid"
+        details:
+          type: object
+          description: Additional error context
+          additionalProperties: true
+        request_id:
+          type: string
+          format: uuid
+          description: Correlation ID for debugging
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      required:
+        - code
+        - message
+
+  responses:
+    BadRequest:
+      description: Bad request (validation error)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: "VALIDATION_ERROR"
+            message: "Invalid request payload"
+            details:
+              field: "bike_id"
+              error: "must be a valid UUID"
+
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: "UNAUTHORIZED"
+            message: "Missing or invalid authentication token"
+
+    Forbidden:
+      description: Insufficient permissions (e.g. admin-only endpoint called without role=admin claim)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: "FORBIDDEN"
+            message: "Admin privileges required"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: "NOT_FOUND"
+            message: "Bicycle not found"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: "INTERNAL_ERROR"
+            message: "An unexpected error occurred"
+
+# ============================================
+# EXTENSIONS
+# ============================================
+x-logo:
+  url: https://unicycle.thapar.edu/logo.png
+  altText: Unicycle Logo
+
+x-ratelimit:
+  default: 100
+  per: minute
+  description: |
+    Rate limits apply per IP address. Exceeding the limit returns 429
+    with an ErrorResponse body; clients should respect the `Retry-After`
+    HTTP header on that response.

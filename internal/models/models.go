@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	api "github.com/sauryagur/unicycle/api"
 	"gorm.io/gorm"
 )
 
@@ -11,23 +12,32 @@ import (
 // ENUMS
 //
 
-type BicycleState string
+// BicycleRideState matches the OpenAPI BicycleRideState enum
+type BicycleRideState string
 
 const (
-	BicycleStateAvailable       BicycleState = "available"
-	BicycleStateBatteryDisabled BicycleState = "battery_disabled"
-	BicycleStateReserved        BicycleState = "reserved"
-	BicycleStateInUse           BicycleState = "in_use"
-	BicycleStateOffline         BicycleState = "offline"
+	BicycleStateAvailable       BicycleRideState = "available"
+	BicycleStateBatteryDisabled BicycleRideState = "battery_disabled"
+	BicycleStateRideRequested   BicycleRideState = "ride_requested"
+	BicycleStateUnlocking       BicycleRideState = "unlocking"
+	BicycleStateInUse           BicycleRideState = "in_use"
+	BicycleStateLocking         BicycleRideState = "locking"
+	BicycleStateLockUnconfirmed BicycleRideState = "lock_unconfirmed"
+	BicycleStateEnded           BicycleRideState = "ended"
+	BicycleStateOfflineEnded    BicycleRideState = "offline_ended"
+	BicycleStateUnlockFailed    BicycleRideState = "unlock_failed"
 )
 
+// RideState matches the OpenAPI Ride state enum
 type RideState string
 
 const (
 	RideStateInProgress   RideState = "in_progress"
 	RideStateEnded        RideState = "ended"
 	RideStateOfflineEnded RideState = "offline_ended"
-	RideStateCancelled    RideState = "cancelled"
+	// Note: Cancelled is not in the OpenAPI spec, but you may want to keep it
+	// for internal use. If you expose it via API, you'll need to add it to the spec.
+	// RideStateCancelled    RideState = "cancelled"
 )
 
 type RideEndMethod string
@@ -110,13 +120,14 @@ func (User) TableName() string { return "users" }
 type Bicycle struct {
 	BaseModel
 
-	MACAddress   string       `gorm:"type:macaddr;uniqueIndex;not null"`
-	SerialNumber string       `gorm:"type:text;uniqueIndex;not null"`
-	PublicKey    []byte       `gorm:"type:bytea;not null"`
-	State        BicycleState `gorm:"type:text;not null;default:'available'"`
-	BatteryPct   *int16       `gorm:"type:smallint"`
-	LastSeenAt   *time.Time   `gorm:"type:timestamptz"`
-	Disabled     bool         `gorm:"not null;default:false"`
+	MACAddress    string           `gorm:"type:macaddr;uniqueIndex;not null"`
+	SerialNumber  string           `gorm:"type:text;uniqueIndex;not null"`
+	PublicKey     []byte           `gorm:"type:bytea;not null"`
+	State         BicycleRideState `gorm:"type:text;not null;default:'available'"`
+	BatteryPct    *int             `gorm:"type:integer"`
+	LastSeenAt    *time.Time       `gorm:"type:timestamptz"`
+	Disabled      bool             `gorm:"not null;default:false"`
+	CurrentRideID *uuid.UUID       `gorm:"type:uuid;index"`
 
 	Rides   []Ride   `gorm:"foreignKey:BikeID;references:ID"`
 	Reports []Report `gorm:"foreignKey:BikeID;references:ID"`
@@ -220,13 +231,38 @@ func (Transaction) TableName() string { return "transactions" }
 //
 
 type BikeTelemetry struct {
-	BikeID     uuid.UUID    `gorm:"type:uuid;not null;index:idx_telemetry_bike_time,priority:1"`
-	Time       time.Time    `gorm:"type:timestamptz;not null;index:idx_telemetry_bike_time,priority:2"`
-	BatteryPct *int16       `gorm:"type:smallint"`
-	State      BicycleState `gorm:"type:text"`
+	BikeID     uuid.UUID        `gorm:"type:uuid;not null;index:idx_telemetry_bike_time,priority:1"`
+	Time       time.Time        `gorm:"type:timestamptz;not null;index:idx_telemetry_bike_time,priority:2"`
+	BatteryPct *int16           `gorm:"type:smallint"`
+	State      BicycleRideState `gorm:"type:text"`
 	Upright    *bool
 
 	Bike Bicycle `gorm:"foreignKey:BikeID;references:ID;constraint:OnDelete:CASCADE"`
 }
 
 func (BikeTelemetry) TableName() string { return "bike_telemetry" }
+
+// Helper function to convert between GORM state and API state
+func (b *Bicycle) ToAPIBicycle() api.Bicycle {
+	return api.Bicycle{
+		Id:            b.ID,
+		SerialNumber:  b.SerialNumber,
+		MacAddress:    b.MACAddress,
+		State:         api.BicycleRideState(b.State),
+		BatteryPct:    b.BatteryPct,
+		LastSeenAt:    b.LastSeenAt,
+		CurrentRideId: b.CurrentRideID,
+		Disabled:      b.Disabled,
+	}
+}
+
+// Helper function to convert API state to GORM state
+func (b *Bicycle) FromAPIBicycle(apiBike api.Bicycle) {
+	b.State = BicycleRideState(apiBike.State)
+	b.MACAddress = apiBike.MacAddress
+	b.SerialNumber = apiBike.SerialNumber
+	b.Disabled = apiBike.Disabled
+	b.BatteryPct = apiBike.BatteryPct
+	b.LastSeenAt = apiBike.LastSeenAt
+	b.CurrentRideID = apiBike.CurrentRideId
+}
