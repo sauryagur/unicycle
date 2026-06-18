@@ -35,9 +35,9 @@ const (
 	RideStateInProgress   RideState = "in_progress"
 	RideStateEnded        RideState = "ended"
 	RideStateOfflineEnded RideState = "offline_ended"
-	// Note: Cancelled is not in the OpenAPI spec, but you may want to keep it
+	// RideStateCancelled Note: Cancelled is not in the OpenAPI spec, but you may want to keep it
 	// for internal use. If you expose it via API, you'll need to add it to the spec.
-	// RideStateCancelled    RideState = "cancelled"
+	RideStateCancelled RideState = "cancelled"
 )
 
 type RideEndMethod string
