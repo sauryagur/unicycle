@@ -9,6 +9,7 @@ import (
 	"github.com/sauryagur/unicycle/internal/integrations"
 	"github.com/sauryagur/unicycle/internal/models"
 	"gorm.io/gorm"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,35 +75,21 @@ func NewProductionStore(db *gorm.DB, signer *appauth.JWT, google *integrations.G
 	return s
 }
 
-func (s *Store) reload() {
-	if s.DB == nil {
-		return
+func (s *Store) userByID(id uuid.UUID) *models.User {
+	s.RLock()
+	u := s.Users[id]
+	s.RUnlock()
+	if u != nil || s.DB == nil {
+		return u
 	}
-	var users []models.User
-	var bikes []models.Bicycle
-	var rides []models.Ride
-	var reports []models.Report
-	var transactions []models.Transaction
-	if s.DB.Find(&users).Error != nil || s.DB.Find(&bikes).Error != nil || s.DB.Find(&rides).Error != nil || s.DB.Find(&reports).Error != nil || s.DB.Find(&transactions).Error != nil {
-		return
+	var found models.User
+	if s.DB.First(&found, id).Error != nil {
+		return nil
 	}
 	s.Lock()
-	defer s.Unlock()
-	for i := range users {
-		s.Users[users[i].ID] = &users[i]
-	}
-	for i := range bikes {
-		s.Bikes[bikes[i].ID] = &bikes[i]
-	}
-	for i := range rides {
-		s.Rides[rides[i].ID] = &rides[i]
-	}
-	for i := range reports {
-		s.Reports[reports[i].ID] = &reports[i]
-	}
-	for i := range transactions {
-		s.Transactions[transactions[i].ID] = &transactions[i]
-	}
+	s.Users[id] = &found
+	s.Unlock()
+	return &found
 }
 
 var defaultStore = NewStore()
@@ -116,9 +103,7 @@ func SetupRoutesWithStore(r *gin.Engine, s *Store) {
 	a.POST("/refresh", auth(s), func(c *gin.Context) {
 		token := uuid.NewString()
 		if s.JWT != nil {
-			s.RLock()
-			u := s.Users[uid(c)]
-			s.RUnlock()
+			u := s.userByID(uid(c))
 			if u == nil {
 				fail(c, 401, "UNAUTHORIZED", "User not found")
 				return
@@ -141,7 +126,10 @@ func SetupRoutesWithStore(r *gin.Engine, s *Store) {
 		p := strings.Fields(c.GetHeader("Authorization"))
 		if s.JWT != nil && s.Redis != nil {
 			if claims, err := s.JWT.Parse(p[1]); err == nil && claims.ID != "" {
-				_ = s.Redis.Revoke(c, "jwt:revoked:"+claims.ID, 24*time.Hour)
+				ttl := time.Until(claims.ExpiresAt.Time)
+				if ttl > 0 {
+					_ = s.Redis.Revoke(c, "jwt:revoked:"+claims.ID, ttl)
+				}
 			}
 		}
 		s.Lock()
@@ -211,7 +199,6 @@ func parseID(c *gin.Context, k string) (uuid.UUID, bool) {
 }
 func auth(s *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		s.reload()
 		p := strings.Fields(c.GetHeader("Authorization"))
 		if len(p) != 2 || !strings.EqualFold(p[0], "Bearer") {
 			fail(c, 401, "UNAUTHORIZED", "Missing or invalid authentication token")
@@ -235,6 +222,10 @@ func auth(s *Store) gin.HandlerFunc {
 				}
 			}
 			c.Set("uid", claims.UserID)
+			if s.userByID(claims.UserID) == nil {
+				fail(c, 401, "UNAUTHORIZED", "User not found")
+				return
+			}
 			c.Next()
 			return
 		}
@@ -246,14 +237,16 @@ func auth(s *Store) gin.HandlerFunc {
 			return
 		}
 		c.Set("uid", u)
+		if s.userByID(u) == nil {
+			fail(c, 401, "UNAUTHORIZED", "User not found")
+			return
+		}
 		c.Next()
 	}
 }
 func admin(s *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		s.RLock()
-		u := s.Users[c.MustGet("uid").(uuid.UUID)]
-		s.RUnlock()
+		u := s.userByID(c.MustGet("uid").(uuid.UUID))
 		if u == nil || u.Role != models.UserRoleAdmin {
 			fail(c, 403, "FORBIDDEN", "Admin privileges required")
 			return
@@ -296,23 +289,20 @@ func google(c *gin.Context, s *Store) {
 	if s.JWT == nil {
 		s.Tokens[t] = u.ID
 	}
+	s.Unlock()
 	if s.DB != nil {
 		if err := s.DB.Where("google_sub = ?", u.GoogleSub).FirstOrCreate(u).Error; err != nil {
-			s.Unlock()
 			fail(c, 500, "INTERNAL_ERROR", "Unable to persist user")
 			return
 		}
 	}
-	s.Unlock()
 	c.JSON(200, gin.H{"token": t, "user": userOut(u)})
 }
 func userOut(u *models.User) gin.H {
 	return gin.H{"id": u.ID, "thapar_id": u.ThaparID, "email": u.Email, "name": u.Name, "role": u.Role, "suspended": u.Suspended, "wallet_balance_paise": u.WalletPaise, "created_at": u.CreatedAt}
 }
 func me(c *gin.Context, s *Store) {
-	s.RLock()
-	u := s.Users[uid(c)]
-	s.RUnlock()
+	u := s.userByID(uid(c))
 	if u == nil {
 		fail(c, 401, "UNAUTHORIZED", "User not found")
 		return
@@ -369,6 +359,7 @@ func bikes(c *gin.Context, s *Store) {
 		a = append(a, bikeOut(b))
 	}
 	s.RUnlock()
+	sort.Slice(a, func(i, j int) bool { return a[i]["id"].(uuid.UUID).String() < a[j]["id"].(uuid.UUID).String() })
 	n := len(a)
 	if o > n {
 		o = n
@@ -412,14 +403,14 @@ func start(c *gin.Context, s *Store) {
 		fail(c, 400, "VALIDATION_ERROR", "bike_id is required")
 		return
 	}
-	s.Lock()
-	defer s.Unlock()
-	u := s.Users[uid(c)]
-	b := s.Bikes[in.BikeID]
+	u := s.userByID(uid(c))
 	if u == nil {
 		fail(c, 401, "UNAUTHORIZED", "User not found")
 		return
 	}
+	s.RLock()
+	b := s.Bikes[in.BikeID]
+	s.RUnlock()
 	if u.Suspended || u.WalletPaise < 1000 {
 		fail(c, 402, "INSUFFICIENT_BALANCE", "Wallet balance is insufficient")
 		return
@@ -439,10 +430,21 @@ func start(c *gin.Context, s *Store) {
 			return
 		}
 	}
+	s.Lock()
+	b = s.Bikes[in.BikeID]
+	if b == nil || b.Disabled || b.State != models.BicycleStateAvailable {
+		s.Unlock()
+		if s.Redis != nil {
+			_ = s.Redis.Release(c, "bike_lock:"+in.BikeID.String())
+		}
+		fail(c, 409, "BIKE_UNAVAILABLE", "This bike is unavailable")
+		return
+	}
 	r := &models.Ride{BaseModel: models.BaseModel{ID: uuid.New(), CreatedAt: time.Now().UTC()}, UserID: u.ID, BikeID: b.ID, StartedAt: time.Now().UTC(), State: models.RideStateInProgress, StartRouterID: in.StartRouterID}
 	s.Rides[r.ID] = r
 	b.State = models.BicycleStateRideRequested
 	b.CurrentRideID = &r.ID
+	s.Unlock()
 	if s.DB != nil {
 		if err := s.DB.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Create(r).Error; err != nil {
@@ -450,6 +452,14 @@ func start(c *gin.Context, s *Store) {
 			}
 			return tx.Save(b).Error
 		}); err != nil {
+			s.Lock()
+			delete(s.Rides, r.ID)
+			b.State = models.BicycleStateAvailable
+			b.CurrentRideID = nil
+			s.Unlock()
+			if s.Redis != nil {
+				_ = s.Redis.Release(c, "bike_lock:"+in.BikeID.String())
+			}
 			fail(c, 500, "INTERNAL_ERROR", "Unable to persist ride")
 			return
 		}
@@ -457,6 +467,17 @@ func start(c *gin.Context, s *Store) {
 	if s.MQTT != nil {
 		payload, _ := json.Marshal(gin.H{"bike_id": b.ID, "ride_id": r.ID, "user_id": u.ID, "command": "unlock"})
 		if err := s.MQTT.Publish("commands/"+b.ID.String(), payload); err != nil {
+			s.Lock()
+			delete(s.Rides, r.ID)
+			b.State = models.BicycleStateAvailable
+			b.CurrentRideID = nil
+			s.Unlock()
+			if s.DB != nil {
+				_ = s.DB.Transaction(func(tx *gorm.DB) error { _ = tx.Delete(r).Error; return tx.Save(b).Error })
+			}
+			if s.Redis != nil {
+				_ = s.Redis.Release(c, "bike_lock:"+in.BikeID.String())
+			}
 			fail(c, 500, "INTERNAL_ERROR", "Unable to publish unlock command")
 			return
 		}
@@ -505,6 +526,7 @@ func history(c *gin.Context, s *Store) {
 		}
 	}
 	s.RUnlock()
+	sort.Slice(a, func(i, j int) bool { return a[i]["id"].(uuid.UUID).String() < a[j]["id"].(uuid.UUID).String() })
 	n := len(a)
 	if o > n {
 		o = n
@@ -530,17 +552,19 @@ func end(c *gin.Context, s *Store) {
 		return
 	}
 	s.Lock()
-	defer s.Unlock()
 	r := s.Rides[x]
 	if r == nil {
+		s.Unlock()
 		fail(c, 404, "NOT_FOUND", "Ride not found")
 		return
 	}
 	if r.UserID != uid(c) {
+		s.Unlock()
 		fail(c, 403, "FORBIDDEN", "Access denied")
 		return
 	}
 	if r.State != models.RideStateInProgress {
+		s.Unlock()
 		fail(c, 409, "RIDE_NOT_ELIGIBLE", "This ride has already ended")
 		return
 	}
@@ -548,18 +572,43 @@ func end(c *gin.Context, s *Store) {
 	r.EndMethod = &m
 	r.State = models.RideStateOfflineEnded
 	r.DisputeFlag = true
+	now := time.Now().UTC()
+	r.EndedAt = &now
+	duration := int(now.Sub(r.StartedAt).Seconds())
+	if duration < 0 {
+		duration = 0
+	}
+	r.DurationSeconds = &duration
+	r.OfflinePhotoURL = &in.PhotoURL
+	r.OfflineLatitude = &in.Latitude
+	r.OfflineLongitude = &in.Longitude
+	b := s.Bikes[r.BikeID]
+	if b != nil {
+		b.State = models.BicycleStateOfflineEnded
+		b.CurrentRideID = nil
+	}
+	s.Unlock()
 	if s.DB != nil {
-		if err := s.DB.Save(r).Error; err != nil {
+		if err := s.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(r).Error; err != nil {
+				return err
+			}
+			if b != nil {
+				return tx.Save(b).Error
+			}
+			return nil
+		}).Error; err != nil {
 			fail(c, 500, "INTERNAL_ERROR", "Unable to persist ride")
 			return
 		}
 	}
+	if s.Redis != nil {
+		_ = s.Redis.Release(c, "bike_lock:"+r.BikeID.String())
+	}
 	c.JSON(200, rideOut(r))
 }
 func balance(c *gin.Context, s *Store) {
-	s.RLock()
-	u := s.Users[uid(c)]
-	s.RUnlock()
+	u := s.userByID(uid(c))
 	if u == nil {
 		fail(c, 401, "UNAUTHORIZED", "User not found")
 		return
@@ -575,13 +624,17 @@ func topup(c *gin.Context, s *Store) {
 		fail(c, 400, "VALIDATION_ERROR", "invalid top-up")
 		return
 	}
+	u := s.userByID(uid(c))
+	if u == nil {
+		fail(c, 401, "UNAUTHORIZED", "User not found")
+		return
+	}
 	s.Lock()
-	defer s.Unlock()
-	u := s.Users[uid(c)]
 	old := u.WalletPaise
 	u.WalletPaise += in.Amount
 	t := &models.Transaction{BaseModel: models.BaseModel{ID: uuid.New()}, UserID: u.ID, AmountPaise: in.Amount, Type: models.TransactionTypeTopup, BalanceAfterPaise: u.WalletPaise}
 	s.Transactions[t.ID] = t
+	s.Unlock()
 	if s.DB != nil {
 		if err := s.DB.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Save(u).Error; err != nil {
@@ -589,6 +642,10 @@ func topup(c *gin.Context, s *Store) {
 			}
 			return tx.Create(t).Error
 		}); err != nil {
+			s.Lock()
+			delete(s.Transactions, t.ID)
+			u.WalletPaise = old
+			s.Unlock()
 			fail(c, 500, "INTERNAL_ERROR", "Unable to persist top-up")
 			return
 		}
@@ -608,6 +665,7 @@ func txns(c *gin.Context, s *Store) {
 		}
 	}
 	s.RUnlock()
+	sort.Slice(a, func(i, j int) bool { return a[i].ID.String() < a[j].ID.String() })
 	n := len(a)
 	if o > n {
 		o = n
@@ -635,15 +693,19 @@ func reportCreate(c *gin.Context, s *Store) {
 		return
 	}
 	s.Lock()
-	defer s.Unlock()
 	if s.Bikes[in.BikeID] == nil {
+		s.Unlock()
 		fail(c, 400, "VALIDATION_ERROR", "bike not found")
 		return
 	}
 	r := &models.Report{BaseModel: models.BaseModel{ID: uuid.New()}, BikeID: in.BikeID, UserID: &[]uuid.UUID{uid(c)}[0], ReportType: models.ReportType(in.ReportType), Description: &in.Description, PhotoURL: &in.PhotoURL}
 	s.Reports[r.ID] = r
+	s.Unlock()
 	if s.DB != nil {
 		if err := s.DB.Create(r).Error; err != nil {
+			s.Lock()
+			delete(s.Reports, r.ID)
+			s.Unlock()
 			fail(c, 500, "INTERNAL_ERROR", "Unable to persist report")
 			return
 		}
@@ -663,9 +725,7 @@ func report(c *gin.Context, s *Store) {
 		return
 	}
 	if r.UserID == nil || *r.UserID != uid(c) {
-		s.RLock()
-		u := s.Users[uid(c)]
-		s.RUnlock()
+		u := s.userByID(uid(c))
 		if u == nil || u.Role != models.UserRoleAdmin {
 			fail(c, 403, "FORBIDDEN", "Access denied")
 			return
@@ -684,7 +744,15 @@ func fleet(c *gin.Context, s *Store) {
 	}
 	n := len(s.Bikes)
 	s.RUnlock()
-	c.JSON(200, gin.H{"total_bikes": n, "bikes_by_state": counts, "active_rides": 0, "orange_state_count": counts["locking"] + counts["lock_unconfirmed"], "router_count": 0, "online_routers": 0, "fleet_health": "good"})
+	active := 0
+	s.RLock()
+	for _, r := range s.Rides {
+		if r.State == models.RideStateInProgress {
+			active++
+		}
+	}
+	s.RUnlock()
+	c.JSON(200, gin.H{"total_bikes": n, "bikes_by_state": counts, "active_rides": active, "orange_state_count": counts[string(models.BicycleStateLocking)] + counts[string(models.BicycleStateLockUnconfirmed)], "router_count": 0, "online_routers": 0, "fleet_health": "good"})
 }
 func toggle(c *gin.Context, s *Store, on bool) {
 	x, ok := parseID(c, "bike_id")
@@ -693,16 +761,22 @@ func toggle(c *gin.Context, s *Store, on bool) {
 	}
 	s.Lock()
 	b := s.Bikes[x]
-	if b != nil {
-		b.Disabled = on
-		if s.DB != nil {
-			_ = s.DB.Save(b).Error
-		}
-	}
-	s.Unlock()
 	if b == nil {
+		s.Unlock()
 		fail(c, 404, "NOT_FOUND", "Bicycle not found")
 		return
+	}
+	previous := b.Disabled
+	b.Disabled = on
+	s.Unlock()
+	if s.DB != nil {
+		if err := s.DB.Save(b).Error; err != nil {
+			s.Lock()
+			b.Disabled = previous
+			s.Unlock()
+			fail(c, 500, "INTERNAL_ERROR", "Unable to persist bicycle")
+			return
+		}
 	}
 	c.JSON(200, bikeOut(b))
 }
@@ -717,6 +791,7 @@ func reports(c *gin.Context, s *Store) {
 		a = append(a, r)
 	}
 	s.RUnlock()
+	sort.Slice(a, func(i, j int) bool { return a[i].ID.String() < a[j].ID.String() })
 	n := len(a)
 	if o > n {
 		o = n
@@ -736,14 +811,17 @@ func resolve(c *gin.Context, s *Store) {
 	r := s.Reports[x]
 	if r != nil {
 		r.Resolved = true
-		if s.DB != nil {
-			_ = s.DB.Save(r).Error
-		}
 	}
 	s.Unlock()
 	if r == nil {
 		fail(c, 404, "NOT_FOUND", "Report not found")
 		return
+	}
+	if s.DB != nil {
+		if err := s.DB.Save(r).Error; err != nil {
+			fail(c, 500, "INTERNAL_ERROR", "Unable to persist report")
+			return
+		}
 	}
 	c.JSON(200, r)
 }

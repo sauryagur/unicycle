@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const publishTimeout = 10 * time.Second
+
 type Publisher struct{ Client mqtt.Client }
 
 func NewMQTT() (*Publisher, error) {
@@ -30,7 +32,9 @@ func NewMQTT() (*Publisher, error) {
 }
 func (p *Publisher) Publish(topic string, payload []byte) error {
 	t := p.Client.Publish(topic, 1, false, payload)
-	t.Wait()
+	if !t.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("MQTT publish timed out")
+	}
 	return t.Error()
 }
 func (p *Publisher) Close() {

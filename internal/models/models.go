@@ -173,8 +173,11 @@ type Ride struct {
 	StartRouterID *uuid.UUID `gorm:"type:uuid;index"`
 	EndRouterID   *uuid.UUID `gorm:"type:uuid;index"`
 
-	EndMethod   *RideEndMethod `gorm:"type:text"`
-	DisputeFlag bool           `gorm:"not null;default:false"`
+	EndMethod        *RideEndMethod `gorm:"type:text"`
+	DisputeFlag      bool           `gorm:"not null;default:false"`
+	OfflinePhotoURL  *string        `gorm:"type:text"`
+	OfflineLatitude  *float64
+	OfflineLongitude *float64
 
 	User User    `gorm:"foreignKey:UserID;references:ID;constraint:OnDelete:CASCADE"`
 	Bike Bicycle `gorm:"foreignKey:BikeID;references:ID;constraint:OnDelete:CASCADE"`

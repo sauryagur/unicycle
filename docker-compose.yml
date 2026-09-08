@@ -18,8 +18,6 @@ services:
       - MQTT_BROKER=tcp://mqtt:1883
       - MQTT_CLIENT_ID=unicycle-api
       - MQTT_TLS=false
-      - JWT_PRIVATE_KEY_FILE=/run/secrets/jwt-private.pem
-      - JWT_PUBLIC_KEY_FILE=/run/secrets/jwt-public.pem
       - JWT_ISSUER=unicycle-api
       - JWT_ALLOW_EPHEMERAL=true
       - GOOGLE_CLIENT_ID
@@ -46,8 +44,6 @@ services:
 
   mqtt:
     image: eclipse-mosquitto:2
-    ports:
-      - "1883:1883"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 

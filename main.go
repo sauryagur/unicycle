@@ -40,7 +40,7 @@ func main() {
 
 	signer, err := auth.LoadFromEnv()
 	if err != nil {
-		if os.Getenv("JWT_ALLOW_EPHEMERAL") != "true" {
+		if os.Getenv("JWT_ALLOW_EPHEMERAL") != "true" || os.Getenv("JWT_PRIVATE_KEY_FILE") != "" || os.Getenv("JWT_PUBLIC_KEY_FILE") != "" {
 			log.Fatalf("Failed to load JWT keys: %v", err)
 		}
 		log.Printf("Warning: using ephemeral JWT keys; set JWT_PRIVATE_KEY_FILE and JWT_PUBLIC_KEY_FILE in production")
