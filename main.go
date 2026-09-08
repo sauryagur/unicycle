@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -10,6 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/sauryagur/unicycle/config"
+	"github.com/sauryagur/unicycle/internal/auth"
+	"github.com/sauryagur/unicycle/internal/integrations"
 	"github.com/sauryagur/unicycle/internal/routes"
 	"github.com/sauryagur/unicycle/pkg/utils"
 )
@@ -35,6 +38,22 @@ func main() {
 		log.Fatalf("Failed to run database migrations: %v", err)
 	}
 
+	signer, err := auth.LoadFromEnv()
+	if err != nil {
+		log.Fatalf("Failed to load JWT keys: %v", err)
+	}
+	redis := integrations.NewRedis()
+	if err := redis.Ping(context.Background()); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	mqtt, err := integrations.NewMQTT()
+	if err != nil {
+		log.Fatalf("Failed to connect to MQTT: %v", err)
+	}
+	defer redis.Close()
+	defer mqtt.Close()
+	store := routes.NewProductionStore(config.DB, signer, integrations.NewGoogleOAuth(), redis, mqtt)
+
 	// Set Gin mode
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -44,7 +63,7 @@ func main() {
 	router := gin.Default()
 
 	// Setup routes
-	routes.SetupRoutes(router)
+	routes.SetupRoutesWithStore(router, store)
 
 	// Start server
 	port := os.Getenv("SERVER_PORT")
