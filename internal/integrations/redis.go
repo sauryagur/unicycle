@@ -17,4 +17,11 @@ func (r *Redis) Reserve(ctx context.Context, key string, ttl time.Duration) (boo
 	return r.Client.SetNX(ctx, key, "1", ttl).Result()
 }
 func (r *Redis) Release(ctx context.Context, key string) error { return r.Client.Del(ctx, key).Err() }
-func (r *Redis) Close() error                                  { return r.Client.Close() }
+func (r *Redis) Revoke(ctx context.Context, key string, ttl time.Duration) error {
+	return r.Client.Set(ctx, key, "1", ttl).Err()
+}
+func (r *Redis) Revoked(ctx context.Context, key string) (bool, error) {
+	n, err := r.Client.Exists(ctx, key).Result()
+	return n > 0, err
+}
+func (r *Redis) Close() error { return r.Client.Close() }

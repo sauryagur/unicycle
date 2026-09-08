@@ -5,12 +5,27 @@ services:
       - "8080:8080"
     depends_on:
       - db
+      - redis
+      - mqtt
     environment:
       - DB_HOST=db
       - DB_PORT=5432
       - DB_USER=postgres
       - DB_PASSWORD=password
       - DB_NAME=unicycle-db
+      - DB_SSLMODE=disable
+      - REDIS_ADDR=redis:6379
+      - MQTT_BROKER=tcp://mqtt:1883
+      - MQTT_CLIENT_ID=unicycle-api
+      - MQTT_TLS=false
+      - JWT_PRIVATE_KEY_FILE=/run/secrets/jwt-private.pem
+      - JWT_PUBLIC_KEY_FILE=/run/secrets/jwt-public.pem
+      - JWT_ISSUER=unicycle-api
+      - GOOGLE_CLIENT_ID
+      - GOOGLE_CLIENT_SECRET
+      - GOOGLE_REDIRECT_URL
+    volumes:
+      - ./secrets:/run/secrets:ro
 
   db:
     image: postgres:17-alpine
@@ -22,6 +37,18 @@ services:
       - "5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 
 
 volumes:

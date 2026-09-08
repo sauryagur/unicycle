@@ -42,11 +42,19 @@ func LoadFromEnv() (*JWT, error) {
 	}
 	priv, err := x509.ParsePKCS8PrivateKey(privBlock.Bytes)
 	if err != nil {
-		return nil, err
+		if parsed, pkcs1Err := x509.ParsePKCS1PrivateKey(privBlock.Bytes); pkcs1Err == nil {
+			priv = parsed
+		} else {
+			return nil, err
+		}
 	}
 	pub, err := x509.ParsePKIXPublicKey(pubBlock.Bytes)
 	if err != nil {
-		return nil, err
+		if parsed, pkcs1Err := x509.ParsePKCS1PublicKey(pubBlock.Bytes); pkcs1Err == nil {
+			pub = parsed
+		} else {
+			return nil, err
+		}
 	}
 	private, ok := priv.(*rsa.PrivateKey)
 	if !ok {

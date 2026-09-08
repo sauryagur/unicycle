@@ -74,14 +74,43 @@ func NewProductionStore(db *gorm.DB, signer *appauth.JWT, google *integrations.G
 	return s
 }
 
+func (s *Store) reload() {
+	if s.DB == nil {
+		return
+	}
+	var users []models.User
+	var bikes []models.Bicycle
+	var rides []models.Ride
+	var reports []models.Report
+	var transactions []models.Transaction
+	if s.DB.Find(&users).Error != nil || s.DB.Find(&bikes).Error != nil || s.DB.Find(&rides).Error != nil || s.DB.Find(&reports).Error != nil || s.DB.Find(&transactions).Error != nil {
+		return
+	}
+	s.Lock()
+	defer s.Unlock()
+	for i := range users {
+		s.Users[users[i].ID] = &users[i]
+	}
+	for i := range bikes {
+		s.Bikes[bikes[i].ID] = &bikes[i]
+	}
+	for i := range rides {
+		s.Rides[rides[i].ID] = &rides[i]
+	}
+	for i := range reports {
+		s.Reports[reports[i].ID] = &reports[i]
+	}
+	for i := range transactions {
+		s.Transactions[transactions[i].ID] = &transactions[i]
+	}
+}
+
 var defaultStore = NewStore()
 
 func SetupRoutes(r *gin.Engine) { SetupRoutesWithStore(r, defaultStore) }
 func SetupRoutesWithStore(r *gin.Engine, s *Store) {
 	v := r.Group("/v1")
-	v.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "healthy", "version": "1.0.0", "uptime": "0s", "checks": gin.H{"database": "ok", "redis": "ok", "mqtt": "ok"}})
-	})
+	v.GET("/health", func(c *gin.Context) { health(c, s) })
 	a := v.Group("/auth")
 	a.POST("/google", func(c *gin.Context) { google(c, s) })
 	a.POST("/refresh", auth(s), func(c *gin.Context) {
@@ -110,6 +139,11 @@ func SetupRoutesWithStore(r *gin.Engine, s *Store) {
 	})
 	a.POST("/logout", auth(s), func(c *gin.Context) {
 		p := strings.Fields(c.GetHeader("Authorization"))
+		if s.JWT != nil && s.Redis != nil {
+			if claims, err := s.JWT.Parse(p[1]); err == nil && claims.ID != "" {
+				_ = s.Redis.Revoke(c, "jwt:revoked:"+claims.ID, 24*time.Hour)
+			}
+		}
 		s.Lock()
 		delete(s.Tokens, p[1])
 		s.Unlock()
@@ -141,6 +175,32 @@ func SetupRoutesWithStore(r *gin.Engine, s *Store) {
 func fail(c *gin.Context, n int, code, msg string) {
 	c.AbortWithStatusJSON(n, gin.H{"code": code, "message": msg})
 }
+func health(c *gin.Context, s *Store) {
+	checks := gin.H{"database": "ok", "redis": "ok", "mqtt": "ok"}
+	unhealthy := false
+	if s.DB != nil {
+		if db, err := s.DB.DB(); err != nil || db.PingContext(c) != nil {
+			checks["database"] = "error"
+			unhealthy = true
+		}
+	}
+	if s.Redis != nil {
+		if s.Redis.Ping(c) != nil {
+			checks["redis"] = "error"
+			unhealthy = true
+		}
+	}
+	if s.MQTT != nil && !s.MQTT.Client.IsConnected() {
+		checks["mqtt"] = "error"
+		unhealthy = true
+	}
+	status := "healthy"
+	code := 200
+	if unhealthy {
+		status, code = "unhealthy", 503
+	}
+	c.JSON(code, gin.H{"status": status, "version": "1.0.0", "uptime": "0s", "checks": checks})
+}
 func parseID(c *gin.Context, k string) (uuid.UUID, bool) {
 	x, e := uuid.Parse(c.Param(k))
 	if e != nil {
@@ -151,6 +211,7 @@ func parseID(c *gin.Context, k string) (uuid.UUID, bool) {
 }
 func auth(s *Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		s.reload()
 		p := strings.Fields(c.GetHeader("Authorization"))
 		if len(p) != 2 || !strings.EqualFold(p[0], "Bearer") {
 			fail(c, 401, "UNAUTHORIZED", "Missing or invalid authentication token")
@@ -161,6 +222,17 @@ func auth(s *Store) gin.HandlerFunc {
 			if err != nil {
 				fail(c, 401, "UNAUTHORIZED", "Missing or invalid authentication token")
 				return
+			}
+			if s.Redis != nil && claims.ID != "" {
+				revoked, err := s.Redis.Revoked(c, "jwt:revoked:"+claims.ID)
+				if err != nil {
+					fail(c, 503, "SERVICE_UNAVAILABLE", "Authentication service unavailable")
+					return
+				}
+				if revoked {
+					fail(c, 401, "UNAUTHORIZED", "Token has been revoked")
+					return
+				}
 			}
 			c.Set("uid", claims.UserID)
 			c.Next()
