@@ -23,6 +23,15 @@ func TestJWTIssueAndParseRS256(t *testing.T) {
 	require.Equal(t, "admin", claims.Role)
 }
 
+func TestEphemeralJWTWorksForDevelopment(t *testing.T) {
+	j, err := NewEphemeral()
+	require.NoError(t, err)
+	token, err := j.Issue(uuid.New(), "id", "student")
+	require.NoError(t, err)
+	_, err = j.Parse(token)
+	require.NoError(t, err)
+}
+
 func TestJWTRejectsExpiredToken(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

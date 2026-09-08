@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -24,6 +25,17 @@ type JWT struct {
 	public  *rsa.PublicKey
 	issuer  string
 	ttl     time.Duration
+}
+
+// NewEphemeral creates a process-local key pair for development only. Tokens
+// become invalid after restart; production must use LoadFromEnv with mounted
+// persistent keys.
+func NewEphemeral() (*JWT, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	return &JWT{private: key, public: &key.PublicKey, issuer: os.Getenv("JWT_ISSUER"), ttl: 24 * time.Hour}, nil
 }
 
 func LoadFromEnv() (*JWT, error) {

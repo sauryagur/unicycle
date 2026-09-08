@@ -21,6 +21,7 @@ services:
       - JWT_PRIVATE_KEY_FILE=/run/secrets/jwt-private.pem
       - JWT_PUBLIC_KEY_FILE=/run/secrets/jwt-public.pem
       - JWT_ISSUER=unicycle-api
+      - JWT_ALLOW_EPHEMERAL=true
       - GOOGLE_CLIENT_ID
       - GOOGLE_CLIENT_SECRET
       - GOOGLE_REDIRECT_URL

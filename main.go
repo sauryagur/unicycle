@@ -40,7 +40,14 @@ func main() {
 
 	signer, err := auth.LoadFromEnv()
 	if err != nil {
-		log.Fatalf("Failed to load JWT keys: %v", err)
+		if os.Getenv("JWT_ALLOW_EPHEMERAL") != "true" {
+			log.Fatalf("Failed to load JWT keys: %v", err)
+		}
+		log.Printf("Warning: using ephemeral JWT keys; set JWT_PRIVATE_KEY_FILE and JWT_PUBLIC_KEY_FILE in production")
+		signer, err = auth.NewEphemeral()
+		if err != nil {
+			log.Fatalf("Failed to generate ephemeral JWT keys: %v", err)
+		}
 	}
 	redis := integrations.NewRedis()
 	if err := redis.Ping(context.Background()); err != nil {
