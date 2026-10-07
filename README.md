@@ -463,6 +463,13 @@ QR codes are printed on tamper-evident stickers. Damaged or missing QR codes are
 
 ---
 
+### 7.5 Web PWA MVP
+
+The Next.js student web app lives in `web/` and provides Google OAuth sign-in, bike discovery and ride start, ride history, wallet top-ups, and issue reports. It uses the `/v1` REST API through a same-origin Next.js rewrite, so the browser does not call the Go API cross-origin.
+
+Run it from `web/` with `npm install` and `npm run dev`. Set `API_ORIGIN` to the backend origin (default `http://localhost:8080`) and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` to the Google OAuth client ID. Register the web origin plus `/login` as an authorized redirect URI.
+
+The PWA includes a web app manifest, install icon, and an offline navigation fallback. Bike, wallet, and ride operations remain online-only; the service worker does not cache authenticated API responses. Normal rides end through a router-confirmed lock. Offline photo evidence is a disputed fallback, not a normal end-ride action.
 ## 8. Security Model
 
 ### 8.1 Bicycle Authentication

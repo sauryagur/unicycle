@@ -1,0 +1,4 @@
+const CACHE="unicycle-shell-v1";
+self.addEventListener("install",event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(["/offline.html","/icon.svg","/manifest.webmanifest"])));self.skipWaiting()});
+self.addEventListener("activate",event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim()))});
+self.addEventListener("fetch",event=>{const request=event.request;const url=new URL(request.url);if(request.method!=="GET"||url.origin!==self.location.origin||url.pathname.startsWith("/api/")||url.pathname.startsWith("/_next/"))return;if(request.mode==="navigate")event.respondWith((async()=>{const offline=async()=>await caches.match("/offline.html")||new Response("Offline",{status:503,headers:{"Content-Type":"text/plain"}});if(!self.navigator.onLine)return offline();try{return await fetch(request,{cache:"no-store"})}catch{return offline()}})())});
